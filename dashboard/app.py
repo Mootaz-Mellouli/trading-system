@@ -17,7 +17,8 @@ from core.analysis.ict_report import build_ict_analysis
 from core.analysis.range_session import DEFAULT_SESSIONS, session_bounds, session_spans
 from core.backtest.engine import Backtester, BTConfig, trades_to_frame
 from core.data.provider import (
-    BinanceProvider, CachedProvider, SyntheticProvider, YFinanceProvider)
+    BinanceProvider, CachedProvider, CoinbaseProvider, KrakenProvider,
+    SyntheticProvider, YFinanceProvider)
 from core.detectors.fvg import detect_fvgs
 from core.detectors.liquidity import detect_liquidity
 from core.detectors.orderblocks import detect_orderblocks
@@ -37,6 +38,19 @@ SYMBOLS_BINANCE = [
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT",
     "BTCEUR", "ETHEUR",
     "PAXGUSDT",            # PAX Gold: 1 token = 1 troy oz of gold
+]
+# Coinbase (US-based -> works on Streamlit Cloud). Products use BASE-QUOTE.
+SYMBOLS_COINBASE = [
+    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD",
+    "DOGE-USD", "AVAX-USD", "LINK-USD",
+    "BTC-EUR", "ETH-EUR",
+]
+# Kraken (US-accessible). Pairs use Kraken naming (BTC = XBT); incl. PAXG gold.
+SYMBOLS_KRAKEN = [
+    "XBTUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD",
+    "DOGEUSD", "AVAXUSD", "LINKUSD",
+    "XBTEUR", "ETHEUR",
+    "PAXGUSD",            # PAX Gold: 1 token = 1 troy oz of gold
 ]
 SYMBOLS_YAHOO = [
     "EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "AUDUSD=X",
@@ -78,11 +92,17 @@ def _reading_color(value: str) -> str:
 # ----------------------------------------------------------- sidebar -------
 with st.sidebar:
     st.header("Data")
-    source = st.radio("Source", ["Synthetic (offline)", "Live (Binance)",
-                                 "Live (Yahoo Finance)"])
-    symbol_options = SYMBOLS_BINANCE if "Binance" in source else SYMBOLS_YAHOO
+    source = st.radio("Source", ["Synthetic (offline)", "Live (Coinbase)",
+                                 "Live (Kraken)", "Live (Binance)",
+                                 "Live (Yahoo Finance)"],
+                      help="Coinbase/Kraken marchent sur Streamlit Cloud ; "
+                           "Binance est bloqué depuis les serveurs US.")
+    _symbols_by_source = {"Coinbase": SYMBOLS_COINBASE, "Kraken": SYMBOLS_KRAKEN,
+                          "Binance": SYMBOLS_BINANCE}
+    symbol_options = next((lst for key, lst in _symbols_by_source.items()
+                           if key in source), SYMBOLS_YAHOO)
     symbol = st.selectbox("Symbol", symbol_options, index=0,
-                          help="Crypto + or (PAXG) via Binance · "
+                          help="Crypto + or (PAXG) via Binance/Kraken · "
                                "forex/indices via Yahoo. Liste selon la source.")
     interval = st.selectbox("Timeframe", ["5m", "15m", "1h", "1d"], index=1)
     bars = st.slider("Candles", 200, 1500, 600, step=100)
@@ -127,6 +147,10 @@ with st.sidebar:
 def make_provider(source: str):
     if source.startswith("Synthetic"):
         return SyntheticProvider(seed=7)
+    if "Coinbase" in source:
+        return CachedProvider(CoinbaseProvider())
+    if "Kraken" in source:
+        return CachedProvider(KrakenProvider())
     if "Binance" in source:
         return CachedProvider(BinanceProvider())
     return CachedProvider(YFinanceProvider())

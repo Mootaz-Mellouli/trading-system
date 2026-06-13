@@ -156,6 +156,117 @@ class BinanceProvider(BaseProvider):
         return df[COLUMNS].astype(float).tail(bars)
 
 
+class CoinbaseProvider(BaseProvider):
+    """Real crypto data via the Coinbase Exchange public API.
+
+    Coinbase is US-based, so unlike Binance it is reachable from US-hosted
+    infrastructure (e.g. Streamlit Community Cloud) — use this as the
+    cloud-friendly crypto feed. Public market data needs NO API key.
+
+    Symbols are products like 'BTC-USD', 'ETH-USD', 'BTC-EUR'. The candles
+    endpoint returns rows ordered [time, low, high, open, close, volume]
+    (note the order!), newest first, max 300 per request; we page backward.
+    """
+
+    BASE_URL = "https://api.exchange.coinbase.com/products/{product}/candles"
+    MAX_CANDLES = 300  # Coinbase hard cap per request
+
+    # interval -> granularity in seconds (the only values Coinbase accepts)
+    GRANULARITY = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600,
+                   "6h": 21600, "1d": 86400}
+
+    def __init__(self, base_url: str | None = None):
+        self.base_url = base_url or self.BASE_URL
+
+    def _get(self, product: str, params: dict) -> list:
+        """HTTP seam: isolated so tests can stub the network out."""
+        import requests  # lazy: only needed for live mode
+
+        resp = requests.get(self.base_url.format(product=product.upper()),
+                            params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch(self, symbol: str, interval: str, bars: int) -> pd.DataFrame:
+        if interval not in self.GRANULARITY:
+            raise ValueError(f"Coinbase has no '{interval}' interval")
+        gran = self.GRANULARITY[interval]
+        rows: list = []
+        end_ts: pd.Timestamp | None = None
+        remaining = bars
+        while remaining > 0:
+            n = min(remaining, self.MAX_CANDLES)
+            params: dict = {"granularity": gran}
+            if end_ts is not None:  # page backward with an explicit window
+                start_ts = end_ts - pd.Timedelta(seconds=gran * n)
+                params["start"] = start_ts.isoformat()
+                params["end"] = end_ts.isoformat()
+            batch = self._get(symbol, params)  # newest-first, [t,low,high,open,close,vol]
+            if not batch:
+                break
+            rows = batch + rows
+            remaining -= len(batch)
+            oldest = min(r[0] for r in batch)
+            end_ts = pd.Timestamp(oldest, unit="s", tz="UTC") - pd.Timedelta(seconds=gran)
+            if len(batch) < n:
+                break  # exchange has no more history
+        if not rows:
+            raise RuntimeError(f"No data returned for {symbol} {interval}")
+        df = pd.DataFrame(rows, columns=["open_time", "low", "high", "open",
+                                         "close", "volume"])
+        df = df[~df["open_time"].duplicated(keep="last")]
+        df["time"] = pd.to_datetime(df["open_time"], unit="s", utc=True)
+        df = df.set_index("time").sort_index()
+        return df[COLUMNS].astype(float).tail(bars)
+
+
+class KrakenProvider(BaseProvider):
+    """Real crypto data via the Kraken public OHLC API.
+
+    Kraken is US-accessible (another cloud-friendly option) and needs NO API
+    key. Pairs use Kraken naming, e.g. 'XBTUSD' (BTC is XBT), 'ETHUSD',
+    'PAXGUSD' (PAX Gold). NOTE: the OHLC endpoint only serves the most recent
+    ~720 candles per interval — there is no deep history here; for that, use
+    Binance locally.
+    """
+
+    BASE_URL = "https://api.kraken.com/0/public/OHLC"
+
+    # interval -> minutes (the values Kraken accepts)
+    INTERVALS = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
+                 "4h": 240, "1d": 1440}
+
+    def __init__(self, base_url: str | None = None):
+        self.base_url = base_url or self.BASE_URL
+
+    def _get(self, params: dict) -> dict:
+        """HTTP seam: isolated so tests can stub the network out."""
+        import requests  # lazy: only needed for live mode
+
+        resp = requests.get(self.base_url, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch(self, symbol: str, interval: str, bars: int) -> pd.DataFrame:
+        if interval not in self.INTERVALS:
+            raise ValueError(f"Kraken has no '{interval}' interval")
+        payload = self._get({"pair": symbol.upper(),
+                             "interval": self.INTERVALS[interval]})
+        if payload.get("error"):
+            raise RuntimeError(f"Kraken error: {payload['error']}")
+        result = payload["result"]
+        # result holds the (possibly renamed) pair key plus a 'last' cursor
+        key = next(k for k in result if k != "last")
+        rows = result[key]
+        if not rows:
+            raise RuntimeError(f"No data returned for {symbol} {interval}")
+        df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low",
+                                         "close", "vwap", "volume", "count"])
+        df["time"] = pd.to_datetime(df["open_time"], unit="s", utc=True)
+        df = df.set_index("time").sort_index()
+        return df[COLUMNS].astype(float).tail(bars)
+
+
 class CachedProvider(BaseProvider):
     """Wraps any provider with a local parquet cache (one file per symbol/interval)."""
 
