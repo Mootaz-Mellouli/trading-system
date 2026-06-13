@@ -58,9 +58,14 @@ tests/                     Hand-crafted candles with known correct answers.
 5. **Signals are plain data** (`Signal` dataclass with unique `id`). The
    backtester, future Telegram bot, and dashboard all consume the same
    object. No head contains trading logic.
-6. **Dashboard is read-only.** Never add order/execution buttons to it.
-   The ICT analysis tab is a CHECKLIST surface: it must never display a
-   buy/sell verdict, a confluence score, or any aggregated recommendation.
+6. **Dashboard shows, never executes.** No order/execution or position-
+   sizing buttons, ever. The ICT analysis tab MAY display deterministic
+   **scores** and **trade setups** (entry zone, SL, TP1/2/3). But: scores
+   are tunable weighted sums of named elements, labeled *confluence
+   strength* — never win-probability or profit odds; setups are
+   suggestions a human confirms, not commands; every score and level
+   traces back to the detectors that produced it. (Was checklist-only;
+   the scoring milestone deliberately lifted that.)
 7. Money expectations live in the docs, not the code: this system executes
    the client's rules with discipline; it does not promise profit. Don't add
    copy that implies otherwise.
@@ -77,39 +82,43 @@ tests/                     Hand-crafted candles with known correct answers.
 
 ## Roadmap (next milestones, in order)
 
-1. **Complete ICT analysis page** (current focus). New deterministic
-   detectors and an aggregator, surfaced as the dashboard's first tab:
-   - `core/detectors/orderblocks.py` — last opposing candle before a
-     displacement; states fresh/tested/invalidated; confirmed_at = the
-     displacement candle (no lookahead).
-   - `core/detectors/liquidity.py` — buyside/sellside pools from untaken
-     swing points, equal highs/lows within ATR tolerance, sweep detection
-     (pierce by wick, close back inside).
-   - `core/analysis/range_session.py` — dealing range with premium /
-     discount / equilibrium position; kill-zone & session utilities
-     (UTC-based, time passed in explicitly, never wall-clock).
-   - `core/analysis/ict_report.py` — build_ict_analysis(): runs all
-     detectors across bias timeframes + entry timeframe, returns one
-     structured ICTAnalysis object incl. a confluence CHECKLIST
-     (element -> bullish/bearish/neutral + key level). NO scores, NO
-     aggregate verdicts, NO trade recommendations — checklist only;
-     the decision is human. Never let a change reintroduce a verdict.
-   - Dashboard tab "Analyse ICT" (French labels — francophone client):
-     bias cards, chart with all overlays, confluence table, nearest
-     zones by ATR distance, liquidity map, range gauge, session clock.
-2. Telegram signal bot: scheduler -> run strategies -> alert with inline
+1. ✅ **ICT analysis page** (DONE). Deterministic detectors + aggregator,
+   surfaced as the dashboard's "Analyse ICT" tab: `orderblocks.py`,
+   `liquidity.py`, `range_session.py`, `ict_report.py` (build_ict_analysis
+   -> structured ICTAnalysis with a confluence checklist). Data sources:
+   Synthetic / Yahoo / Binance (crypto + PAXG gold, no API key).
+2. **ICT scoring + setups** (current focus). The client wants the system to
+   act more like an analyst — deterministically, not via an LLM:
+   - `core/detectors/ote.py` — Optimal Trade Entry: 62/70.5/79% fib zone of
+     the last CONFIRMED impulse leg (no lookahead).
+   - `core/analysis/amd.py` — Accumulation / Manipulation / Distribution
+     (Power-of-3) phase from session range + sweeps; time passed in.
+   - `core/analysis/scoring.py` — per-element scores (structure, liquidity,
+     order block, FVG, session, OTE) + an aggregate *confluence strength*
+     per direction. Tunable weights (rule 4), bounded, every point traces
+     to a named element. NOT a win-probability (rule 7).
+   - `TradeSetup` (extends the `Signal` plain-data rule) with entry_zone_
+     top/bottom, SL, TP1/TP2/TP3 — targets from liquidity / structure / fib
+     extensions, all knobs. Built deterministically; backtestable.
+   - Dashboard: score panel (component bars + strength gauge per
+     direction), AMD badge, OTE overlay, setup card. DISPLAY-ONLY — no
+     execute/sizing buttons (rule 6), disclaimer kept (rule 7).
+3. Telegram signal bot: scheduler -> run strategies -> alert with inline
    ✅ Execute / ❌ Skip buttons; signal expiry; idempotent by signal id;
    alert-only mode until execution exists. Log every signal/decision to DB
    (needs a core/storage.py SQLite layer first).
-3. Client's real strategy rules as a new `BaseStrategy` subclass (kill
+4. Client's real strategy rules as a new `BaseStrategy` subclass (kill
    zones, HTF bias, liquidity sweeps) once his spec arrives — do NOT extend
    FVGRetestStrategy.
-4. Broker/exchange execution module (last; paper/sandbox first).
+5. Broker/exchange execution module (last; paper/sandbox first).
 
 **Descoped:** the LLM analysis agent (`agent/` module, anthropic dep). The
-client wants all ICT details computed and displayed deterministically, not
-a chat analyst. If an `agent/` folder exists in the repo, it is dormant —
-do not extend it, do not add anthropic API calls anywhere.
+client wants all ICT details — scores, setups, everything — COMPUTED
+deterministically, not by a chat analyst. If an `agent/` folder exists in
+the repo, it is dormant — do not extend it, do not add anthropic API calls
+anywhere. The one allowed exception (per rule 2) is phrasing already-decided
+deterministic output into prose AFTER the core computed it; an LLM may never
+produce a number, score, level, or direction.
 
 ## Deployment
 
