@@ -1,8 +1,11 @@
 """Interactive chart: the 'does my code see what the trader sees?' tool.
 
-Renders candles + detected FVGs (shaded zones), swing labels (HH/HL/LH/LL),
-BOS/CHoCH markers, and strategy signals. Output is a standalone HTML file
-the trader can open, zoom and pan in any browser.
+Renders candles + detected FVGs (shaded zones), order blocks (bordered
+rectangles), liquidity pools (dashed level lines, thicker for equal
+highs/lows) and sweeps (X markers), session windows (shaded vertical
+bands), swing labels (HH/HL/LH/LL), BOS/CHoCH markers, and strategy
+signals. Output is a standalone HTML file the trader
+can open, zoom and pan in any browser.
 """
 from __future__ import annotations
 
@@ -13,10 +16,17 @@ GREEN = "rgba(29,158,117,0.18)"
 GREEN_LINE = "rgba(29,158,117,0.6)"
 RED = "rgba(216,90,48,0.18)"
 RED_LINE = "rgba(216,90,48,0.6)"
+OB_GREEN = "rgba(29,158,117,0.07)"
+OB_GREEN_LINE = "rgba(29,158,117,0.9)"
+OB_RED = "rgba(216,90,48,0.07)"
+OB_RED_LINE = "rgba(216,90,48,0.9)"
+LIQ_BUY_LINE = "rgba(29,158,117,0.85)"
+LIQ_SELL_LINE = "rgba(216,90,48,0.85)"
 
 
 def build_chart(df: pd.DataFrame, fvgs=None, swings=None, events=None,
-                signals=None, title: str = "Chart") -> go.Figure:
+                signals=None, orderblocks=None, pools=None, sweeps=None,
+                session_spans=None, title: str = "Chart") -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["open"], high=df["high"],
@@ -25,6 +35,12 @@ def build_chart(df: pd.DataFrame, fvgs=None, swings=None, events=None,
     ))
 
     end_time = df.index[-1]
+
+    for s0, s1, label in (session_spans or []):  # (start, end, name) windows
+        fig.add_vrect(x0=s0, x1=s1, fillcolor="rgba(98,114,164,0.06)",
+                      line_width=0, layer="below",
+                      annotation_text=label, annotation_position="top left",
+                      annotation_font=dict(size=9, color="#9b9a93"))
     for f in (fvgs or []):
         until = f.filled_at or end_time
         fill = GREEN if f.kind == "bullish" else RED
@@ -32,6 +48,36 @@ def build_chart(df: pd.DataFrame, fvgs=None, swings=None, events=None,
         fig.add_shape(type="rect", x0=f.created_at, x1=until,
                       y0=f.bottom, y1=f.top, fillcolor=fill,
                       line=dict(color=line, width=1), layer="below")
+
+    for ob in (orderblocks or []):
+        until = ob.invalidated_at or end_time
+        fill = OB_GREEN if ob.kind == "bullish" else OB_RED
+        line = OB_GREEN_LINE if ob.kind == "bullish" else OB_RED_LINE
+        fig.add_shape(type="rect", x0=ob.created_at, x1=until,
+                      y0=ob.bottom, y1=ob.top, fillcolor=fill,
+                      line=dict(color=line, width=2,
+                                dash="solid" if ob.state == "fresh" else "dot"),
+                      layer="below")
+
+    for p in (pools or []):  # only untaken pools are still resting liquidity
+        if p.taken_at is not None:
+            continue
+        color = LIQ_BUY_LINE if p.side == "buyside" else LIQ_SELL_LINE
+        fig.add_shape(type="line", x0=p.created_at, x1=end_time,
+                      y0=p.price, y1=p.price,
+                      line=dict(color=color, dash="dash",
+                                width=2.5 if p.is_equal else 1.2))
+
+    for sw in (sweeps or []):
+        color = "#1D9E75" if sw.side == "buyside" else "#D85A30"
+        fig.add_trace(go.Scatter(
+            x=[sw.time], y=[sw.level], mode="markers",
+            marker=dict(symbol="x", size=11, color=color),
+            name=f"{sw.side} sweep",
+            hovertext=f"{sw.side} liquidity sweep @ {sw.level} "
+                      f"(pierce {sw.pierce_atr} ATR)",
+            hoverinfo="text", showlegend=False,
+        ))
 
     for s in (swings or []):
         if not s.label:

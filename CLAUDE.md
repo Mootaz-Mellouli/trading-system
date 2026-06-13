@@ -59,6 +59,8 @@ tests/                     Hand-crafted candles with known correct answers.
    backtester, future Telegram bot, and dashboard all consume the same
    object. No head contains trading logic.
 6. **Dashboard is read-only.** Never add order/execution buttons to it.
+   The ICT analysis tab is a CHECKLIST surface: it must never display a
+   buy/sell verdict, a confluence score, or any aggregated recommendation.
 7. Money expectations live in the docs, not the code: this system executes
    the client's rules with discipline; it does not promise profit. Don't add
    copy that implies otherwise.
@@ -73,15 +75,49 @@ tests/                     Hand-crafted candles with known correct answers.
 - Dashboard smoke test uses `streamlit.testing.v1.AppTest` — keep it green.
 - Plotly HTML exports use `include_plotlyjs="cdn"` to stay small.
 
-## Roadmap (next milestones)
+## Roadmap (next milestones, in order)
 
-1. Telegram signal bot: scheduler -> run strategies -> alert with inline
+1. **Complete ICT analysis page** (current focus). New deterministic
+   detectors and an aggregator, surfaced as the dashboard's first tab:
+   - `core/detectors/orderblocks.py` — last opposing candle before a
+     displacement; states fresh/tested/invalidated; confirmed_at = the
+     displacement candle (no lookahead).
+   - `core/detectors/liquidity.py` — buyside/sellside pools from untaken
+     swing points, equal highs/lows within ATR tolerance, sweep detection
+     (pierce by wick, close back inside).
+   - `core/analysis/range_session.py` — dealing range with premium /
+     discount / equilibrium position; kill-zone & session utilities
+     (UTC-based, time passed in explicitly, never wall-clock).
+   - `core/analysis/ict_report.py` — build_ict_analysis(): runs all
+     detectors across bias timeframes + entry timeframe, returns one
+     structured ICTAnalysis object incl. a confluence CHECKLIST
+     (element -> bullish/bearish/neutral + key level). NO scores, NO
+     aggregate verdicts, NO trade recommendations — checklist only;
+     the decision is human. Never let a change reintroduce a verdict.
+   - Dashboard tab "Analyse ICT" (French labels — francophone client):
+     bias cards, chart with all overlays, confluence table, nearest
+     zones by ATR distance, liquidity map, range gauge, session clock.
+2. Telegram signal bot: scheduler -> run strategies -> alert with inline
    ✅ Execute / ❌ Skip buttons; signal expiry; idempotent by signal id;
-   alert-only mode until execution exists. Log every signal/decision to DB.
-2. Client's real strategy rules as a new `BaseStrategy` subclass (kill
+   alert-only mode until execution exists. Log every signal/decision to DB
+   (needs a core/storage.py SQLite layer first).
+3. Client's real strategy rules as a new `BaseStrategy` subclass (kill
    zones, HTF bias, liquidity sweeps) once his spec arrives — do NOT extend
    FVGRetestStrategy.
-3. Broker/exchange execution module (last; paper/sandbox first).
+4. Broker/exchange execution module (last; paper/sandbox first).
+
+**Descoped:** the LLM analysis agent (`agent/` module, anthropic dep). The
+client wants all ICT details computed and displayed deterministically, not
+a chat analyst. If an `agent/` folder exists in the repo, it is dormant —
+do not extend it, do not add anthropic API calls anywhere.
+
+## Deployment
+
+The dashboard is deployed on Streamlit Cloud from this repo's `main`
+branch (main file: `dashboard/app.py`). Every push to `main` auto-deploys:
+NEVER push to main with failing tests. requirements.txt is version-pinned
+for the cloud build; update pins deliberately, not casually. No secrets
+are currently required (Yahoo needs no key).
 
 ## Known limitations (intentional for now)
 

@@ -7,6 +7,8 @@ import pytest
 
 from core.data.provider import CachedProvider, SyntheticProvider, COLUMNS
 from core.detectors.fvg import detect_fvgs
+from core.detectors.liquidity import detect_liquidity
+from core.detectors.orderblocks import detect_orderblocks
 from core.detectors.swings import detect_swings, detect_structure_events
 from core.strategies.base import FVGRetestStrategy
 
@@ -57,6 +59,208 @@ def test_fvg_fill_tracking():
 def test_fvg_displacement_filter():
     df = fvg_fixture()
     assert len(detect_fvgs(df, min_displacement_atr=100.0)) == 0
+
+
+# ------------------------------------------------------- order blocks ------
+
+def ob_bullish_fixture() -> pd.DataFrame:
+    quiet = [(1.0000, 1.0003, 0.9999, 1.0002)] * 16          # rows 0..15
+    rows = quiet + [
+        (1.0002, 1.0006, 0.9996, 0.9998),  # 16: bearish OB candle, zone [0.9996, 1.0006]
+        (0.9998, 1.0032, 0.9997, 1.0030),  # 17: bullish displacement, closes above 1.0006
+        (1.0030, 1.0038, 1.0010, 1.0034),  # 18: stays above the zone (fresh)
+        (1.0034, 1.0035, 1.0004, 1.0012),  # 19: wick into zone -> tested
+        (1.0012, 1.0018, 1.0008, 1.0009),  # 20: holds above the zone
+        (1.0009, 1.0016, 0.9988, 0.9990),  # 21: closes below 0.9996 -> invalidated
+    ]
+    return make_df(rows)
+
+
+def ob_bearish_fixture() -> pd.DataFrame:
+    quiet = [(1.0000, 1.0003, 0.9999, 1.0002)] * 16          # rows 0..15
+    rows = quiet + [
+        (1.0002, 1.0008, 0.9998, 1.0006),  # 16: bullish OB candle, zone [0.9998, 1.0008]
+        (1.0006, 1.0007, 0.9972, 0.9975),  # 17: bearish displacement, closes below 0.9998
+        (0.9975, 0.9990, 0.9966, 0.9970),  # 18: stays below the zone (fresh)
+        (0.9970, 1.0000, 0.9968, 0.9988),  # 19: wick into zone -> tested
+        (0.9990, 0.9995, 0.9985, 0.9992),  # 20: holds below the zone
+        (0.9992, 1.0015, 0.9991, 1.0012),  # 21: closes above 1.0008 -> invalidated
+    ]
+    return make_df(rows)
+
+
+def test_bullish_orderblock_exact_zone():
+    df = ob_bullish_fixture()
+    obs = detect_orderblocks(df, min_displacement_atr=1.0)
+    assert len(obs) == 1
+    ob = obs[0]
+    assert ob.kind == "bullish"
+    assert ob.created_at == df.index[16]      # the OB candle itself
+    assert ob.confirmed_at == df.index[17]    # the displacement candle
+    assert ob.top == pytest.approx(1.0006)    # high of candle 16
+    assert ob.bottom == pytest.approx(0.9996)  # low of candle 16
+    assert ob.displacement_atr >= 1.0
+
+
+def test_bearish_orderblock_exact_zone():
+    df = ob_bearish_fixture()
+    obs = detect_orderblocks(df, min_displacement_atr=1.0)
+    assert len(obs) == 1
+    ob = obs[0]
+    assert ob.kind == "bearish"
+    assert ob.created_at == df.index[16]
+    assert ob.confirmed_at == df.index[17]
+    assert ob.top == pytest.approx(1.0008)
+    assert ob.bottom == pytest.approx(0.9998)
+
+
+def test_orderblock_state_lifecycle():
+    for fixture in (ob_bullish_fixture, ob_bearish_fixture):
+        df = fixture()
+        ob = detect_orderblocks(df, min_displacement_atr=1.0)[0]
+        assert ob.tested_at == df.index[19]       # first wick into the zone
+        assert ob.invalidated_at == df.index[21]  # first close beyond the far side
+        assert ob.state == "invalidated"
+        # state at intermediate points in time, via truncated data
+        assert detect_orderblocks(df.iloc[:19], 1.0)[0].state == "fresh"
+        assert detect_orderblocks(df.iloc[:20], 1.0)[0].state == "tested"
+
+
+def test_orderblock_no_lookahead():
+    """The OB must only exist once the displacement candle (row 17) has
+    closed, and never before — whatever prefix of the data we feed in."""
+    df = ob_bullish_fixture()
+    for k in range(len(df) + 1):
+        obs = detect_orderblocks(df.iloc[:k], min_displacement_atr=1.0)
+        if k <= 17:  # prefix ends before the displacement candle exists
+            assert obs == []
+        else:
+            assert len(obs) == 1
+            assert obs[0].confirmed_at == df.index[17]
+
+
+def test_orderblock_displacement_filter():
+    df = ob_bullish_fixture()
+    assert detect_orderblocks(df, min_displacement_atr=100.0) == []
+
+
+# ---------------------------------------------------------- liquidity ------
+
+def liquidity_fixture() -> pd.DataFrame:
+    """Two near-equal swing highs (one pool of equal highs at 1.0040), one
+    swing low (sellside pool at 0.9990), then a wick that sweeps the highs."""
+    quiet = [(1.0000, 1.0003, 0.9999, 1.0002)] * 16          # rows 0..15
+    rows = quiet + [
+        (1.0002, 1.0012, 1.0000, 1.0010),  # 16
+        (1.0010, 1.0040, 1.0008, 1.0030),  # 17: swing high #1 @ 1.0040 (confirms @19)
+        (1.0030, 1.0032, 1.0012, 1.0014),  # 18
+        (1.0014, 1.0016, 0.9990, 0.9992),  # 19: swing low @ 0.9990 (confirms @21)
+        (0.9992, 1.0010, 0.9992, 1.0008),  # 20
+        (1.0008, 1.0024, 1.0006, 1.0022),  # 21
+        (1.0022, 1.0039, 1.0020, 1.0030),  # 22: swing high #2 @ 1.0039 (confirms @24,
+                                           #     equal high: 0.0001 from #1)
+        (1.0030, 1.0032, 1.0014, 1.0016),  # 23
+        (1.0016, 1.0018, 1.0002, 1.0004),  # 24
+        (1.0004, 1.0044, 1.0002, 1.0030),  # 25: pierces 1.0040 by 0.0004, closes
+                                           #     back below -> buyside sweep
+    ]
+    return make_df(rows)
+
+
+def test_liquidity_pools_exact():
+    df = liquidity_fixture()
+    pools, _ = detect_liquidity(df, detect_swings(df, lookback=2))
+    buy = [p for p in pools if p.side == "buyside"]
+    sell = [p for p in pools if p.side == "sellside"]
+    assert len(buy) == 1 and len(sell) == 1
+    b = buy[0]
+    assert b.price == pytest.approx(1.0040)    # extreme of the two equal highs
+    assert b.created_at == df.index[17]        # first member swing
+    assert b.confirmed_at == df.index[24]      # 'equal highs' knowable when #2 confirms
+    assert b.swing_times == [df.index[17], df.index[22]]
+    assert b.is_equal
+    s = sell[0]
+    assert s.price == pytest.approx(0.9990)
+    assert s.created_at == df.index[19]
+    assert s.confirmed_at == df.index[21]
+    assert not s.is_equal
+    assert s.status == "untaken"               # 0.9990 never traded through
+
+
+def test_liquidity_sweep_exact():
+    df = liquidity_fixture()
+    pools, sweeps = detect_liquidity(df, detect_swings(df, lookback=2))
+    assert len(sweeps) == 1
+    sw = sweeps[0]
+    assert sw.time == df.index[25]
+    assert sw.level == pytest.approx(1.0040)
+    assert sw.side == "buyside"
+    assert 0 < sw.pierce_atr <= 0.5
+    b = [p for p in pools if p.side == "buyside"][0]
+    assert b.taken_at == df.index[25]
+    assert b.swept_at == df.index[25]
+    assert b.status == "swept"
+
+
+def test_liquidity_take_without_sweep():
+    # close ABOVE the level -> real break, taken but NOT swept
+    df = liquidity_fixture()
+    df.iloc[25] = [1.0004, 1.0050, 1.0002, 1.0046, 1000.0]
+    pools, sweeps = detect_liquidity(df, detect_swings(df, lookback=2))
+    assert sweeps == []
+    b = [p for p in pools if p.side == "buyside"][0]
+    assert b.taken_at == df.index[25]
+    assert b.swept_at is None
+    assert b.status == "taken"
+    # wick deeper than max_pierce_atr -> also just a take, not a hunt
+    df2 = liquidity_fixture()
+    pools2, sweeps2 = detect_liquidity(df2, detect_swings(df2, lookback=2),
+                                       max_pierce_atr=0.01)
+    assert sweeps2 == []
+    assert [p for p in pools2 if p.side == "buyside"][0].status == "taken"
+
+
+def test_liquidity_equal_grouping_tolerance():
+    # tighter tolerance -> the 0.0001 gap no longer groups -> two pools
+    df = liquidity_fixture()
+    pools, sweeps = detect_liquidity(df, detect_swings(df, lookback=2),
+                                     tolerance_atr=0.05)
+    buy = [p for p in pools if p.side == "buyside"]
+    assert len(buy) == 2
+    assert not any(p.is_equal for p in buy)
+    assert len(sweeps) == 2                    # bar 25 wick sweeps both levels
+
+
+def test_liquidity_no_lookahead():
+    """Pools/sweeps must only exist once knowable: pool #1 when swing #1
+    confirms (bar 19), 'equal highs' when swing #2 confirms (bar 24),
+    the sweep only once bar 25 has closed."""
+    df = liquidity_fixture()
+    for k in range(len(df) + 1):
+        part = df.iloc[:k]
+        pools, sweeps = detect_liquidity(part, detect_swings(part, lookback=2))
+        buy = [p for p in pools if p.side == "buyside"]
+        sell = [p for p in pools if p.side == "sellside"]
+        assert len(buy) == (1 if k >= 20 else 0)
+        if buy:
+            assert buy[0].is_equal == (k >= 25)
+        assert len(sell) == (1 if k >= 22 else 0)
+        assert len(sweeps) == (1 if k >= 26 else 0)
+
+
+def test_liquidity_min_pool_age():
+    df = liquidity_fixture()
+    swings = detect_swings(df, lookback=2)
+    # age gate beyond the data -> no swing's liquidity ever becomes usable
+    pools, sweeps = detect_liquidity(df, swings, min_pool_age_bars=9)
+    assert pools == [] and sweeps == []
+    # age 6: swing #1 usable from bar 23, swing #2 (bar 22+6=28) never -> no
+    # equal-highs grouping, single-member pool still swept at bar 25
+    pools6, sweeps6 = detect_liquidity(df, swings, min_pool_age_bars=6)
+    buy6 = [p for p in pools6 if p.side == "buyside"]
+    assert len(buy6) == 1
+    assert not buy6[0].is_equal
+    assert len(sweeps6) == 1
 
 
 # ------------------------------------------------------------- swings ------

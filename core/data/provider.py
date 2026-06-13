@@ -83,7 +83,7 @@ class SyntheticProvider(BaseProvider):
             l = min(o, c) - wick * (0.3 if drift else 1.0)
             opens.append(o); highs.append(h); lows.append(l); closes.append(c)
             price = c
-        step = pd.Timedelta(interval.replace("m", "min").replace("h", "h"))
+        step = pd.Timedelta(interval.replace("m", "min").replace("d", "D"))
         end = pd.Timestamp.now(tz="UTC").floor(step)
         idx = pd.date_range(end=end, periods=bars, freq=step, name="time")
         df = pd.DataFrame(
