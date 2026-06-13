@@ -29,13 +29,17 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 import pandas as pd
 
+from core.analysis.amd import AMDPhase, amd_from_session
 from core.analysis.range_session import (
     DEFAULT_SESSIONS, DealingRange, dealing_range, session_now,
 )
+from core.analysis.scoring import ICTScores, build_scores
+from core.analysis.setups import TradeSetup, build_setup
 from core.data.provider import BaseProvider
 from core.detectors.fvg import atr, detect_fvgs
 from core.detectors.liquidity import LiquiditySweep, detect_liquidity
 from core.detectors.orderblocks import detect_orderblocks
+from core.detectors.ote import OTEZone, detect_ote
 from core.detectors.swings import detect_swings, detect_structure_events
 from core.strategies.base import BaseStrategy, FVGRetestStrategy, Signal
 
@@ -86,7 +90,10 @@ class ConfluenceItem:
 
 @dataclass
 class ICTAnalysis:
-    """Checklist only: deliberately has NO score / verdict / recommendation."""
+    """One ICT snapshot. Carries the confluence checklist AND (per rule 6,
+    rewritten) deterministic scores + a display-only setup suggestion. It
+    still has NO single verdict/recommendation field — both score directions
+    are presented side by side and the setup is explicitly a suggestion."""
     symbol: str
     generated_at: pd.Timestamp     # last entry-tf candle time (data, not wall clock)
     entry_timeframe: str
@@ -101,6 +108,10 @@ class ICTAnalysis:
     active_session: str
     signals: list[Signal] = field(default_factory=list)
     confluence: list[ConfluenceItem] = field(default_factory=list)
+    ote_zones: list[OTEZone] = field(default_factory=list)
+    amd: AMDPhase | None = None
+    scores: ICTScores | None = None
+    setup: TradeSetup | None = None        # display-only suggestion, may be None
 
     def to_dict(self) -> dict:
         return _jsonable(asdict(self))
@@ -159,6 +170,17 @@ def build_ict_analysis(
     sessions: dict = DEFAULT_SESSIONS,
     n_recent_sweeps: int = 5,
     strategies: list[BaseStrategy] | None = None,
+    ote_fib_low: float = 0.62,              # OTE band knobs
+    ote_fib_high: float = 0.79,
+    ote_sweet: float = 0.705,
+    ote_min_leg_atr: float = 1.0,
+    amd_session: str = "asia",              # accumulation reference window
+    score_weights: dict | None = None,      # confluence weights (knobs)
+    score_proximity_atr: float = 3.0,
+    setup_min_strength: float = 50.0,       # setup gating knobs
+    setup_margin: float = 10.0,
+    setup_sl_buffer: float = 0.0,
+    setup_rr_targets: tuple[float, float, float] = (1.0, 2.0, 3.0),
 ) -> ICTAnalysis:
     """Fetch candles per timeframe, run all detectors, return one snapshot."""
     df = provider.fetch(symbol, entry_tf, bars)
@@ -208,6 +230,11 @@ def build_ict_analysis(
              for p in pools if p.status == "untaken"),
             key=lambda p: p.distance_atr)
 
+    ote_zones = detect_ote(df, swings, ote_fib_low, ote_fib_high, ote_sweet,
+                           ote_min_leg_atr, atr_period)
+    amd = amd_from_session(df, amd_session, sessions, max_pierce_atr,
+                           atr_period=atr_period)
+
     strategies = strategies if strategies is not None else [FVGRetestStrategy()]
     signals = [s for strat in strategies for s in strat.generate(symbol, df)]
 
@@ -220,8 +247,16 @@ def build_ict_analysis(
         dealing_range=dr,
         active_session=session_now(now, sessions),
         signals=signals,
+        ote_zones=ote_zones, amd=amd,
     )
     analysis.confluence = _build_confluence(analysis)
+    analysis.scores = build_scores(analysis, ote_zones, amd,
+                                   weights=score_weights,
+                                   proximity_atr=score_proximity_atr)
+    analysis.setup = build_setup(analysis, analysis.scores, ote_zones,
+                                 min_strength=setup_min_strength,
+                                 margin=setup_margin, sl_buffer=setup_sl_buffer,
+                                 rr_targets=setup_rr_targets)
     return analysis
 
 

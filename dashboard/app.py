@@ -55,6 +55,8 @@ ZONE_FR = {"premium": "Premium", "discount": "Discount",
 ETAT_FR = {"open": "Ouvert", "mitigated": "Mitigé", "fresh": "Frais"}
 SESSION_FR = {"asia": "Asie", "london_kz": "KZ Londres", "ny_kz": "KZ New York",
               "london_close": "Clôture Londres", "off_hours": "Hors session"}
+AMD_FR = {"accumulation": "Accumulation", "manipulation": "Manipulation",
+          "distribution": "Distribution", "undefined": "Indéfini"}
 
 
 def fr_element(name: str) -> str:
@@ -102,6 +104,19 @@ with st.sidebar:
     max_pierce = st.slider("Sweep : mèche max (× ATR)", 0.1, 2.0, 0.5, 0.1)
     eq_band = st.slider("Bande équilibre (± % du range)", 0.0, 15.0, 5.0, 1.0)
 
+    st.header("Score & setups")
+    with st.expander("Poids du score (confluence)"):
+        w_structure = st.slider("Structure", 0.0, 1.0, 0.25, 0.05)
+        w_liquidity = st.slider("Liquidité", 0.0, 1.0, 0.20, 0.05)
+        w_orderblock = st.slider("Order block", 0.0, 1.0, 0.15, 0.05)
+        w_fvg = st.slider("FVG", 0.0, 1.0, 0.10, 0.05)
+        w_ote = st.slider("OTE", 0.0, 1.0, 0.15, 0.05)
+        w_amd = st.slider("AMD", 0.0, 1.0, 0.15, 0.05)
+    setup_min_strength = st.slider("Setup : force min", 0.0, 100.0, 50.0, 5.0,
+                                   help="Force de confluence minimale pour proposer un setup")
+    setup_margin = st.slider("Setup : marge directionnelle", 0.0, 50.0, 10.0, 5.0,
+                             help="Écart minimal entre les deux directions")
+
     st.header("Backtest")
     equity0 = st.number_input("Starting equity", 1_000, 1_000_000, 10_000, step=1_000)
     risk_pct = st.slider("Risk per trade (%)", 0.25, 3.0, 1.0, 0.25)
@@ -126,12 +141,17 @@ def load_data(source: str, symbol: str, interval: str, bars: int) -> pd.DataFram
 def load_analysis(source: str, symbol: str, interval: str, bars: int,
                   bias_tfs: tuple, min_disp: float, lookback: int, rr: float,
                   ob_min_disp: float, tol_atr: float, max_pierce: float,
-                  eq_band: float):
+                  eq_band: float, weights: tuple, setup_min_strength: float,
+                  setup_margin: float):
+    score_weights = dict(zip(
+        ("structure", "liquidity", "orderblock", "fvg", "ote", "amd"), weights))
     return build_ict_analysis(
         make_provider(source), symbol, interval, bias_tfs=bias_tfs, bars=bars,
         swing_lookback=lookback, min_displacement_atr=min_disp,
         ob_min_displacement_atr=ob_min_disp, tolerance_atr=tol_atr,
         max_pierce_atr=max_pierce, eq_tolerance_pct=eq_band,
+        score_weights=score_weights, setup_min_strength=setup_min_strength,
+        setup_margin=setup_margin,
         strategies=[FVGRetestStrategy(min_displacement_atr=min_disp,
                                       swing_lookback=lookback, rr=rr)])
 
@@ -164,28 +184,39 @@ c4.metric("Signals", len(signals))
 tab_ict, tab_chart, tab_bt, tab_signals = st.tabs(
     ["🧭 Analyse ICT", "📈 Chart", "🧪 Backtest", "📋 Signals"])
 
-# The ICT tab is a READ-ONLY CHECKLIST surface (non-negotiable rule 6):
-# never display a buy/sell verdict, a confluence score, or any aggregated
-# recommendation here. The decision is human.
+# The ICT tab is DISPLAY-ONLY (rule 6, rewritten): it may show deterministic
+# scores and a trade-setup suggestion, but NEVER an execute/sizing button and
+# NEVER a single collapsed buy/sell verdict. Both score directions stay
+# visible; the setup is explicitly a suggestion. The decision is human.
 with tab_ict:
     analysis = None
     try:
         analysis = load_analysis(source, symbol, interval, bars,
                                  tuple(bias_tfs), min_disp, lookback, rr,
-                                 ob_min_disp, tol_atr, max_pierce, eq_band)
+                                 ob_min_disp, tol_atr, max_pierce, eq_band,
+                                 (w_structure, w_liquidity, w_orderblock,
+                                  w_fvg, w_ote, w_amd),
+                                 setup_min_strength, setup_margin)
     except Exception as exc:
         st.error(f"Analyse ICT impossible : {exc}")
 
     if analysis is not None:
         # ------------------------------------------------ bias panel -------
         views = [*analysis.bias, analysis.entry_structure]
-        for col, sv in zip(st.columns(len(views)), views):
+        amd = analysis.amd
+        cards = st.columns(len(views) + 1)
+        for col, sv in zip(cards, views):
             pos = (f" · {sv.range_position_pct:.0f} %"
                    if sv.range_position_pct is not None else "")
             col.metric(f"Biais {sv.timeframe}",
                        f"{ARROW[sv.trend]} {TREND_FR[sv.trend]}",
                        delta=f"{ZONE_FR.get(sv.range_zone, '—')}{pos}",
                        delta_color="off")
+        amd_dir = (f"{ARROW[amd.direction]} {TREND_FR[amd.direction]}"
+                   if amd and amd.direction != "neutral" else "—")
+        cards[-1].metric("Phase AMD",
+                         AMD_FR.get(amd.phase, "—") if amd else "—",
+                         delta=amd_dir, delta_color="off")
 
         col_chart, col_panels = st.columns([3, 2])
 
@@ -196,13 +227,56 @@ with tab_ict:
                 build_chart(df, fvgs, swings, events, signals,
                             orderblocks=orderblocks, pools=pools,
                             sweeps=sweeps, session_spans=spans,
+                            ote=analysis.ote_zones,
                             title=f"{symbol} {interval} — vue ICT"),
                 width='stretch', key="chart_ict")
             st.caption("Zones ombrées = FVG · rectangles bordés = order blocks "
                        "· lignes pointillées = liquidité (épaisses = highs/lows "
-                       "égaux) · X = sweeps · bandes verticales = sessions.")
+                       "égaux) · X = sweeps · rectangles violets = OTE · "
+                       "bandes verticales = sessions.")
 
         with col_panels:
+            sc = analysis.scores
+            if sc is not None:
+                st.subheader("Force de confluence")
+                gb, gs = st.columns(2)
+                gb.metric("Haussier", f"{sc.bullish.strength:.0f}/100")
+                gs.metric("Baissier", f"{sc.bearish.strength:.0f}/100")
+                st.progress(sc.bullish.strength / 100,
+                            text=f"Haussier {sc.bullish.strength:.0f}")
+                st.progress(sc.bearish.strength / 100,
+                            text=f"Baissier {sc.bearish.strength:.0f}")
+                st.dataframe(pd.DataFrame(
+                    [{"Élément": fr_element(e.element), "Haussier": e.bullish,
+                      "Baissier": e.bearish, "Détail": e.detail}
+                     for e in sc.elements]),
+                    width='stretch', hide_index=True)
+                st.caption("Force de confluence (0–100), pondérée et traçable — "
+                           "PAS une probabilité de gain. Les deux sens sont "
+                           "montrés ; la décision reste humaine.")
+
+            st.subheader("Setup (suggestion)")
+            su = analysis.setup
+            if su is not None:
+                st.markdown(
+                    f"**{ARROW[su.direction]} {TREND_FR[su.direction]}** "
+                    f"· base : {su.basis}")
+                st.dataframe(pd.DataFrame([
+                    {"Niveau": "Zone d'entrée (haut)", "Prix": su.entry_zone_top},
+                    {"Niveau": "Zone d'entrée (bas)", "Prix": su.entry_zone_bottom},
+                    {"Niveau": "Entrée", "Prix": su.entry},
+                    {"Niveau": "Stop loss", "Prix": su.stop_loss},
+                    {"Niveau": "TP1", "Prix": su.tp1},
+                    {"Niveau": "TP2", "Prix": su.tp2},
+                    {"Niveau": "TP3", "Prix": su.tp3},
+                ]).style.format({"Prix": "{:.5f}"}),
+                    width='stretch', hide_index=True)
+                st.caption("Suggestion déterministe à confirmer par un humain — "
+                           "aucun ordre n'est passé depuis ce tableau de bord.")
+            else:
+                st.info("Aucun setup : confluence trop faible ou pas de zone "
+                        "d'entrée nette.")
+
             st.subheader("Confluences")
             conf_df = pd.DataFrame(
                 [{"Élément": fr_element(c.element),

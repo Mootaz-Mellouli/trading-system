@@ -10,6 +10,8 @@ def test_dashboard_runs_headless():
     labels = [m.label for m in at.metric]
     for expected in ("Candles", "FVGs detected", "Signals", "Trades"):
         assert expected in labels
-    # "Analyse ICT" tab: bias cards (one per timeframe) + session clock
+    # "Analyse ICT" tab: bias cards, AMD badge, score panel, session clock
     assert any(label.startswith("Biais") for label in labels)
+    assert "Phase AMD" in labels
+    assert "Haussier" in labels and "Baissier" in labels   # confluence scores
     assert "Session active" in labels

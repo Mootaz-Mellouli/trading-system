@@ -9,6 +9,7 @@ from core.data.provider import CachedProvider, SyntheticProvider, COLUMNS
 from core.detectors.fvg import detect_fvgs
 from core.detectors.liquidity import detect_liquidity
 from core.detectors.orderblocks import detect_orderblocks
+from core.detectors.ote import detect_ote
 from core.detectors.swings import detect_swings, detect_structure_events
 from core.strategies.base import FVGRetestStrategy
 
@@ -261,6 +262,66 @@ def test_liquidity_min_pool_age():
     assert len(buy6) == 1
     assert not buy6[0].is_equal
     assert len(sweeps6) == 1
+
+
+# --------------------------------------------------------------- OTE -------
+
+def ote_fixture() -> pd.DataFrame:
+    """Quiet warm-up (for ATR), a clean bullish impulse leg low@16=1.0000 ->
+    high@20=1.0100, then a retrace into the 62-79% band [1.0021, 1.0038]."""
+    quiet = [(1.0050, 1.0053, 1.0047, 1.0050)] * 14          # rows 0..13
+    rows = quiet + [
+        (1.0050, 1.0050, 1.0030, 1.0035),  # 14
+        (1.0035, 1.0035, 1.0010, 1.0015),  # 15
+        (1.0015, 1.0016, 1.0000, 1.0005),  # 16: swing low @ 1.0000 (conf @18)
+        (1.0005, 1.0030, 1.0004, 1.0028),  # 17
+        (1.0028, 1.0060, 1.0026, 1.0058),  # 18
+        (1.0058, 1.0090, 1.0056, 1.0088),  # 19
+        (1.0088, 1.0100, 1.0086, 1.0095),  # 20: swing high @ 1.0100 (conf @22)
+        (1.0095, 1.0096, 1.0070, 1.0072),  # 21
+        (1.0072, 1.0074, 1.0050, 1.0052),  # 22
+        (1.0052, 1.0053, 1.0030, 1.0033),  # 23: retrace into OTE band -> tested
+        (1.0033, 1.0045, 1.0031, 1.0042),  # 24
+        (1.0042, 1.0060, 1.0040, 1.0058),  # 25
+    ]
+    return make_df(rows)
+
+
+def test_ote_zone_exact_levels():
+    df = ote_fixture()
+    zones = detect_ote(df, detect_swings(df, lookback=2))
+    bull = [z for z in zones if z.direction == "bullish"]
+    assert len(bull) == 1
+    z = bull[0]
+    assert z.created_at == df.index[20]       # leg-end swing high
+    assert z.confirmed_at == df.index[22]      # knowable only when it confirms
+    assert z.leg_low == pytest.approx(1.0000)
+    assert z.leg_high == pytest.approx(1.0100)
+    assert z.top == pytest.approx(1.0038)      # 62% retracement
+    assert z.bottom == pytest.approx(1.0021)   # 79% retracement
+    assert z.sweet == pytest.approx(1.00295)   # 70.5%
+    assert z.entered_at == df.index[23]        # first trade into the band
+    assert z.invalidated_at is None
+    assert z.state == "tested"
+
+
+def test_ote_leg_filter():
+    df = ote_fixture()
+    assert detect_ote(df, detect_swings(df, lookback=2),
+                      min_leg_atr=100.0) == []
+
+
+def test_ote_no_lookahead():
+    """The bullish OTE may only exist once the leg-end swing high (bar 20)
+    has confirmed, at bar 22 -> present from a 23-bar prefix onward."""
+    df = ote_fixture()
+    for k in range(len(df) + 1):
+        part = df.iloc[:k]
+        bull = [z for z in detect_ote(part, detect_swings(part, lookback=2))
+                if z.direction == "bullish"]
+        assert len(bull) == (1 if k >= 23 else 0)
+        if bull:
+            assert bull[0].confirmed_at == df.index[22]
 
 
 # ------------------------------------------------------------- swings ------

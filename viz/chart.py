@@ -24,9 +24,13 @@ LIQ_BUY_LINE = "rgba(29,158,117,0.85)"
 LIQ_SELL_LINE = "rgba(216,90,48,0.85)"
 
 
+OTE_LINE = "rgba(124,93,191,0.9)"
+OTE_FILL = "rgba(124,93,191,0.10)"
+
+
 def build_chart(df: pd.DataFrame, fvgs=None, swings=None, events=None,
                 signals=None, orderblocks=None, pools=None, sweeps=None,
-                session_spans=None, title: str = "Chart") -> go.Figure:
+                session_spans=None, ote=None, title: str = "Chart") -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["open"], high=df["high"],
@@ -67,6 +71,17 @@ def build_chart(df: pd.DataFrame, fvgs=None, swings=None, events=None,
                       y0=p.price, y1=p.price,
                       line=dict(color=color, dash="dash",
                                 width=2.5 if p.is_equal else 1.2))
+
+    for z in (ote or []):  # optimal trade entry bands (62-79% retracement)
+        if z.invalidated_at is not None:
+            continue
+        fig.add_shape(type="rect", x0=z.created_at, x1=end_time,
+                      y0=z.bottom, y1=z.top, fillcolor=OTE_FILL,
+                      line=dict(color=OTE_LINE, width=1, dash="dash"),
+                      layer="below")
+        fig.add_annotation(x=z.created_at, y=z.top, text="OTE", showarrow=False,
+                           xanchor="left", yshift=7,
+                           font=dict(size=9, color="#7C5DBF"))
 
     for sw in (sweeps or []):
         color = "#1D9E75" if sw.side == "buyside" else "#D85A30"

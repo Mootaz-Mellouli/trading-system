@@ -6,12 +6,13 @@ from datetime import time
 import pandas as pd
 import pytest
 
+from core.analysis.amd import UNDEFINED, amd_from_session, detect_amd
 from core.analysis.range_session import (
     OFF_HOURS, dealing_range, session_bounds, session_levels, session_now,
     session_spans,
 )
 from core.detectors.swings import detect_swings
-from tests.test_detectors import zigzag_fixture
+from tests.test_detectors import make_df, zigzag_fixture
 
 
 # ------------------------------------------------------- dealing range -----
@@ -75,6 +76,66 @@ def test_dealing_range_no_lookahead():
         assert dr is not None
         assert dr.high == pytest.approx(1.0042 if k <= 14 else
                                         1.0062 if k <= 22 else 1.0052)
+
+
+# ----------------------------------------------------------- AMD phase -----
+
+def amd_fixture() -> pd.DataFrame:
+    """Accumulation range [1.0000, 1.0050]; acc_end after bar 2. Then an
+    inside bar, a sellside grab (bar 4), an inside bar, then a bullish
+    expansion close (bar 6)."""
+    return make_df([
+        (1.0025, 1.0048, 1.0002, 1.0030),  # 0  inside (accumulation)
+        (1.0030, 1.0049, 1.0010, 1.0040),  # 1  inside
+        (1.0040, 1.0050, 1.0020, 1.0045),  # 2  inside  <- acc_end here
+        (1.0045, 1.0049, 1.0030, 1.0035),  # 3  inside
+        (1.0035, 1.0047, 0.9985, 1.0010),  # 4  sellside grab (wick down, close back in)
+        (1.0010, 1.0035, 1.0008, 1.0030),  # 5  inside
+        (1.0030, 1.0075, 1.0028, 1.0070),  # 6  bullish expansion close > 1.0050
+    ])
+
+
+def test_amd_accumulation_then_manipulation_then_distribution():
+    df = amd_fixture()
+    acc_end = df.index[2]
+    # only the first inside bar after acc_end -> still accumulation
+    acc = detect_amd(df.iloc[:4], 1.0000, 1.0050, acc_end)
+    assert (acc.phase, acc.direction) == ("accumulation", "neutral")
+    assert acc.manipulated_at is None and acc.distributed_at is None
+    # through the grab but before the expansion -> manipulation (bullish bias)
+    man = detect_amd(df.iloc[:6], 1.0000, 1.0050, acc_end)
+    assert (man.phase, man.direction) == ("manipulation", "bullish")
+    assert man.manipulation_side == "sellside"
+    assert man.manipulated_at == df.index[4]
+    assert man.distributed_at is None
+    # full data -> distribution up
+    dist = detect_amd(df, 1.0000, 1.0050, acc_end)
+    assert (dist.phase, dist.direction) == ("distribution", "bullish")
+    assert dist.manipulated_at == df.index[4]
+    assert dist.distributed_at == df.index[6]
+
+
+def test_amd_undefined_when_no_bars_after_accumulation():
+    df = amd_fixture()
+    res = detect_amd(df.iloc[:3], 1.0000, 1.0050, df.index[2])
+    assert res.phase == UNDEFINED
+    bad = detect_amd(df, 1.0050, 1.0000, df.index[2])  # inverted range
+    assert bad.phase == UNDEFINED
+
+
+def test_amd_from_session():
+    df = session_df()  # Asian range 0.9950..1.0050 on 2026-01-05, ends 07:00
+    res = amd_from_session(df, "asia", max_pierce_atr=None)
+    assert res.acc_low == pytest.approx(0.9950)
+    assert res.acc_high == pytest.approx(1.0050)
+    assert res.acc_end == pd.Timestamp("2026-01-05 07:00", tz="UTC")
+    assert res.phase == "manipulation"          # sellside grab at 09:00, no expansion
+    assert res.manipulation_side == "sellside"
+    assert res.direction == "bullish"
+    assert res.manipulated_at == pd.Timestamp("2026-01-05 09:00", tz="UTC")
+    # a day with no Asian-window bars -> None
+    part = df[df.index >= pd.Timestamp("2026-01-05 08:00", tz="UTC")]
+    assert amd_from_session(part, "asia") is None
 
 
 # ---------------------------------------------------- sessions / killzones -

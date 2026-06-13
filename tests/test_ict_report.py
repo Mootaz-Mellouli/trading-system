@@ -104,11 +104,38 @@ def test_ict_analysis_is_serializable(analysis):
     assert isinstance(parsed["generated_at"], str)
 
 
-def test_ict_analysis_has_no_verdict(analysis):
-    """Rule 6: checklist only. No field may ever aggregate the checklist
-    into a score, verdict or recommendation."""
-    for forbidden in ("score", "verdict", "recommendation", "confidence",
-                      "bias_score", "rating", "decision"):
+def test_ict_analysis_scores_and_setup_shape(analysis):
+    a = analysis
+    # scores exist now (rule 6 rewritten) and expose BOTH directions
+    assert a.scores is not None
+    assert 0.0 <= a.scores.bullish.strength <= 100.0
+    assert 0.0 <= a.scores.bearish.strength <= 100.0
+    assert 0.0 <= a.scores.session_favorability <= 100.0
+    for es in a.scores.elements:
+        assert 0.0 <= es.bullish <= 100.0 and 0.0 <= es.bearish <= 100.0
+    # detectors attached
+    for z in a.ote_zones:
+        assert z.direction in ("bullish", "bearish")
+    assert a.amd is None or a.amd.phase in (
+        "accumulation", "manipulation", "distribution", "undefined")
+    # setup is optional; when present it is a complete, directional suggestion
+    if a.setup is not None:
+        assert a.setup.direction in ("bullish", "bearish")
+        assert a.setup.tp1 != a.setup.tp2 != a.setup.tp3
+        assert a.setup.to_signal().direction in ("long", "short")
+
+
+def test_ict_analysis_has_no_collapsed_verdict(analysis):
+    """Rule 6 (rewritten): scores and a display-only setup ARE allowed, but
+    nothing may collapse them into a single buy/sell verdict, and scores are
+    never framed as probability. Both directions stay visible."""
+    for forbidden in ("verdict", "recommendation", "decision", "action",
+                      "winner", "probability", "win_rate"):
         assert not hasattr(analysis, forbidden)
+        assert not hasattr(analysis.scores, forbidden)
+    # both sides are always present (no single direction field)
+    assert analysis.scores.bullish is not None
+    assert analysis.scores.bearish is not None
+    # the checklist stays a checklist: no per-item score/weight
     assert not hasattr(analysis.confluence[0], "score")
     assert not hasattr(analysis.confluence[0], "weight")
