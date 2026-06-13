@@ -16,7 +16,8 @@ import streamlit as st
 from core.analysis.ict_report import build_ict_analysis
 from core.analysis.range_session import DEFAULT_SESSIONS, session_bounds, session_spans
 from core.backtest.engine import Backtester, BTConfig, trades_to_frame
-from core.data.provider import CachedProvider, SyntheticProvider, YFinanceProvider
+from core.data.provider import (
+    BinanceProvider, CachedProvider, SyntheticProvider, YFinanceProvider)
 from core.detectors.fvg import detect_fvgs
 from core.detectors.liquidity import detect_liquidity
 from core.detectors.orderblocks import detect_orderblocks
@@ -27,6 +28,23 @@ from viz.report import build_report
 
 st.set_page_config(page_title="Trading system", layout="wide")
 st.title("Trading system — analysis dashboard")
+
+# Curated symbols per source. The first entry is the default selection.
+# Binance pairs (crypto + PAXG gold) for the serious crypto feed; Yahoo
+# tickers (forex needs '=X', crypto BASE-QUOTE) for the validation source.
+SYMBOLS_BINANCE = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT",
+    "BTCEUR", "ETHEUR",
+    "PAXGUSDT",            # PAX Gold: 1 token = 1 troy oz of gold
+]
+SYMBOLS_YAHOO = [
+    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "AUDUSD=X",
+    "USDCAD=X", "NZDUSD=X", "EURGBP=X", "EURJPY=X", "GBPJPY=X",
+    "BTC-USD", "ETH-USD", "BTC-EUR", "ETH-EUR",
+    "GC=F", "SI=F", "CL=F",            # or / argent / pétrole (futures)
+    "^GSPC", "^NDX", "^DJI",            # S&P 500 / Nasdaq 100 / Dow Jones
+]
 
 # French display labels (the client is francophone). Core stays in English.
 TREND_FR = {"bullish": "Haussier", "bearish": "Baissier", "neutral": "Neutre"}
@@ -58,9 +76,12 @@ def _reading_color(value: str) -> str:
 # ----------------------------------------------------------- sidebar -------
 with st.sidebar:
     st.header("Data")
-    source = st.radio("Source", ["Synthetic (offline)", "Live (Yahoo Finance)"])
-    symbol = st.text_input("Symbol", "EURUSD=X",
-                           help="Forex: EURUSD=X · Crypto: BTC-EUR, BTC-USD")
+    source = st.radio("Source", ["Synthetic (offline)", "Live (Binance)",
+                                 "Live (Yahoo Finance)"])
+    symbol_options = SYMBOLS_BINANCE if "Binance" in source else SYMBOLS_YAHOO
+    symbol = st.selectbox("Symbol", symbol_options, index=0,
+                          help="Crypto + or (PAXG) via Binance · "
+                               "forex/indices via Yahoo. Liste selon la source.")
     interval = st.selectbox("Timeframe", ["5m", "15m", "1h", "1d"], index=1)
     bars = st.slider("Candles", 200, 1500, 600, step=100)
 
@@ -88,11 +109,17 @@ with st.sidebar:
                                   step=0.00001, format="%.5f")
 
 
+def make_provider(source: str):
+    if source.startswith("Synthetic"):
+        return SyntheticProvider(seed=7)
+    if "Binance" in source:
+        return CachedProvider(BinanceProvider())
+    return CachedProvider(YFinanceProvider())
+
+
 @st.cache_data(ttl=300, show_spinner="Loading candles…")
 def load_data(source: str, symbol: str, interval: str, bars: int) -> pd.DataFrame:
-    if source.startswith("Synthetic"):
-        return SyntheticProvider(seed=7).fetch(symbol, interval, bars)
-    return CachedProvider(YFinanceProvider()).fetch(symbol, interval, bars)
+    return make_provider(source).fetch(symbol, interval, bars)
 
 
 @st.cache_data(ttl=300, show_spinner="Analyse ICT…")
@@ -100,10 +127,8 @@ def load_analysis(source: str, symbol: str, interval: str, bars: int,
                   bias_tfs: tuple, min_disp: float, lookback: int, rr: float,
                   ob_min_disp: float, tol_atr: float, max_pierce: float,
                   eq_band: float):
-    provider = (SyntheticProvider(seed=7) if source.startswith("Synthetic")
-                else CachedProvider(YFinanceProvider()))
     return build_ict_analysis(
-        provider, symbol, interval, bias_tfs=bias_tfs, bars=bars,
+        make_provider(source), symbol, interval, bias_tfs=bias_tfs, bars=bars,
         swing_lookback=lookback, min_displacement_atr=min_disp,
         ob_min_displacement_atr=ob_min_disp, tolerance_atr=tol_atr,
         max_pierce_atr=max_pierce, eq_tolerance_pct=eq_band,
